@@ -23,9 +23,6 @@ class UserTokens:
     """Container for user's service tokens."""
     
     github_token: Optional[str] = None
-    jira_token: Optional[str] = None
-    slack_token: Optional[str] = None
-    confluence_token: Optional[str] = None
     expiry_time: Optional[datetime] = None
     refresh_token: Optional[str] = None
     
@@ -33,9 +30,6 @@ class UserTokens:
         """Convert to dictionary for storage."""
         return {
             "github_token": self.github_token,
-            "jira_token": self.jira_token,
-            "slack_token": self.slack_token,
-            "confluence_token": self.confluence_token,
             "expiry_time": self.expiry_time.isoformat() if self.expiry_time else None,
             "refresh_token": self.refresh_token
         }
@@ -48,9 +42,6 @@ class UserTokens:
         
         return cls(
             github_token=data.get("github_token"),
-            jira_token=data.get("jira_token"),
-            slack_token=data.get("slack_token"),
-            confluence_token=data.get("confluence_token"),
             expiry_time=expiry_time,
             refresh_token=data.get("refresh_token")
         )
@@ -88,22 +79,15 @@ class SecretStore:
         demo_users = {
             "user_123": UserTokens(
                 github_token="ghp_demo_token_123",
-                jira_token="jira_demo_token_123",
-                slack_token="xoxb-demo-slack-123",
-                confluence_token="conf_demo_token_123",
                 expiry_time=datetime.utcnow() + timedelta(hours=24),
                 refresh_token="refresh_demo_123"
             ),
             "user_456": UserTokens(
                 github_token="ghp_demo_token_456",
-                jira_token="jira_demo_token_456",
                 expiry_time=datetime.utcnow() + timedelta(hours=12)
             ),
             "user_789": UserTokens(
                 github_token="ghp_demo_token_789",
-                jira_token="jira_demo_token_789",
-                slack_token="xoxb-demo-slack-789",
-                confluence_token="conf_demo_token_789",
                 expiry_time=datetime.utcnow() + timedelta(hours=48)
             )
         }
@@ -219,9 +203,6 @@ class SecretStore:
             # Mock token refresh for demo
             new_tokens = UserTokens(
                 github_token=f"ghp_refreshed_{user_id}_{int(datetime.utcnow().timestamp())}",
-                jira_token=f"jira_refreshed_{user_id}_{int(datetime.utcnow().timestamp())}",
-                slack_token=current_tokens.slack_token,  # Some tokens don't need refresh
-                confluence_token=current_tokens.confluence_token,
                 expiry_time=datetime.utcnow() + timedelta(hours=24),
                 refresh_token=f"refresh_new_{user_id}_{int(datetime.utcnow().timestamp())}"
             )
@@ -295,9 +276,7 @@ class SecretStore:
         """
         try:
             validation_urls = {
-                "github": "https://api.github.com/user",
-                "jira": "https://api.atlassian.com/me",
-                "slack": "https://slack.com/api/auth.test"
+                "github": "https://api.github.com/user"
             }
             
             url = validation_urls.get(service)

@@ -43,7 +43,7 @@ class AuthenticatedMCPClient:
         Get MCP server configuration for a service.
         
         Args:
-            service: Service name (github, jira, etc.)
+            service: Service name (github)
             
         Returns:
             Server configuration dictionary
@@ -56,43 +56,6 @@ class AuthenticatedMCPClient:
                     "Authorization": f"Bearer {self.user.get('github_token')}",
                     "User-Agent": "LangGraph-MCP-Client/1.0",
                     "X-User-ID": self.user.get("identity", "unknown")
-                }
-            },
-            "jira": {
-                "transport": "streamable_http", 
-                "url": "https://jira-mcp-server.example.com/mcp",
-                "headers": {
-                    "Authorization": f"Bearer {self.user.get('jira_token')}",
-                    "Content-Type": "application/json",
-                    "X-User-ID": self.user.get("identity", "unknown"),
-                    "X-Org-ID": self.user.get("org_id", "unknown")
-                }
-            },
-            "slack": {
-                "transport": "streamable_http",
-                "url": "https://slack-mcp-server.example.com/mcp", 
-                "headers": {
-                    "Authorization": f"Bearer {self.user.get('slack_token')}",
-                    "X-User-ID": self.user.get("identity", "unknown")
-                }
-            },
-            "confluence": {
-                "transport": "streamable_http",
-                "url": "https://confluence-mcp-server.example.com/mcp",
-                "headers": {
-                    "Authorization": f"Bearer {self.user.get('confluence_token')}",
-                    "X-User-ID": self.user.get("identity", "unknown"),
-                    "X-Org-ID": self.user.get("org_id", "unknown")
-                }
-            },
-            "local_filesystem": {
-                "transport": "stdio",
-                "command": ["python", "-m", "filesystem_mcp_server"],
-                # Note: stdio transport doesn't support headers
-                # Authentication would be handled via environment variables
-                "env": {
-                    "USER_ID": self.user.get("identity", "unknown"),
-                    "ORG_ID": self.user.get("org_id", "unknown")
                 }
             }
         }
@@ -208,7 +171,7 @@ class AuthenticatedMCPClient:
         Returns:
             List of accessible service names
         """
-        all_services = ["github", "jira", "slack", "confluence"]
+        all_services = ["github"]
         available = []
         
         for service in all_services:
@@ -231,7 +194,7 @@ class AuthenticatedMCPClient:
             "org_id": self.user.get("org_id"),
             "workspace_id": self.user.get("workspace_id"),
             "authenticated_at": self.user.get("authenticated_at"),
-            "available_services": self.list_available_services()
+            "available_services": []  # Use separate call to get async services
         }
 
 
@@ -273,108 +236,36 @@ async def github_operations(config: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-async def jira_operations(config: Dict[str, Any], project_key: str) -> Dict[str, Any]:
+async def github_search(config: Dict[str, Any], query: str) -> Dict[str, Any]:
     """
-    Perform common Jira operations.
-    
-    Args:
-        config: LangGraph configuration
-        project_key: Jira project key
-        
-    Returns:
-        Results of Jira operations
-    """
-    mcp = AuthenticatedMCPClient(config)
-    
-    try:
-        # Get project info
-        project = await mcp.call_tool("jira", "get_project", {
-            "project_key": project_key
-        })
-        
-        # Get recent issues
-        issues = await mcp.call_tool("jira", "search_issues", {
-            "jql": f"project = {project_key} ORDER BY updated DESC",
-            "max_results": 10
-        })
-        
-        # Get user's assigned issues
-        user_issues = await mcp.call_tool("jira", "search_issues", {
-            "jql": f"project = {project_key} AND assignee = currentUser()",
-            "max_results": 5
-        })
-        
-        return {
-            "success": True,
-            "project": project,
-            "recent_issues": issues,
-            "assigned_issues": user_issues,
-            "issue_count": len(issues) if issues else 0
-        }
-        
-    except Exception as e:
-        logger.error(f"Jira operations failed: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-
-async def multi_service_search(config: Dict[str, Any], query: str) -> Dict[str, Any]:
-    """
-    Search across multiple services.
+    Search GitHub repositories.
     
     Args:
         config: LangGraph configuration
         query: Search query
         
     Returns:
-        Aggregated search results
+        GitHub search results
     """
     mcp = AuthenticatedMCPClient(config)
-    available_services = await mcp.list_available_services()
     
     results = {
         "query": query,
-        "services_searched": [],
+        "service": "github",
         "results": {}
     }
     
-    # Search GitHub repositories
-    if "github" in available_services:
-        try:
-            github_results = await mcp.call_tool("github", "search_repos", {
-                "q": query,
-                "sort": "stars"
-            })
-            results["services_searched"].append("github")
-            results["results"]["github"] = github_results
-        except Exception as e:
-            logger.error(f"GitHub search failed: {e}")
-    
-    # Search Jira issues
-    if "jira" in available_services:
-        try:
-            jira_results = await mcp.call_tool("jira", "search_issues", {
-                "jql": f"text ~ '{query}' ORDER BY updated DESC",
-                "max_results": 10
-            })
-            results["services_searched"].append("jira")
-            results["results"]["jira"] = jira_results
-        except Exception as e:
-            logger.error(f"Jira search failed: {e}")
-    
-    # Search Confluence pages
-    if "confluence" in available_services:
-        try:
-            confluence_results = await mcp.call_tool("confluence", "search", {
-                "cql": f"text ~ '{query}'",
-                "limit": 10
-            })
-            results["services_searched"].append("confluence")
-            results["results"]["confluence"] = confluence_results
-        except Exception as e:
-            logger.error(f"Confluence search failed: {e}")
+    try:
+        github_results = await mcp.call_tool("github", "search_repos", {
+            "q": query,
+            "sort": "stars"
+        })
+        results["results"]["github"] = github_results
+        results["success"] = True
+    except Exception as e:
+        logger.error(f"GitHub search failed: {e}")
+        results["success"] = False
+        results["error"] = str(e)
     
     return results
 
@@ -392,7 +283,7 @@ def get_supported_transports() -> Dict[str, Dict[str, Any]]:
             "supports_headers": True,
             "supports_auth": True,
             "use_case": "Web APIs and cloud services",
-            "examples": ["GitHub API", "Jira Cloud", "Slack API"]
+            "examples": ["GitHub API", "REST APIs", "Web services"]
         },
         "sse": {
             "supports_headers": True,
