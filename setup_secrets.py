@@ -2,15 +2,13 @@
 """
 Secret Storage Setup for MCP Auth Demo
 
-This script stores GitHub Personal Access Tokens using multiple storage options:
-1. Supabase Vault (alpha feature) - Preferred
-2. AWS Secrets Manager (fallback)
-3. Environment variables (development only)
+This script stores GitHub Personal Access Tokens in Supabase Vault.
+Vault is a Postgres extension that stores encrypted secrets in your database.
 
 Prerequisites:
-1. Supabase project with test users created
-2. GitHub Personal Access Token with Copilot access
-3. Optional: AWS credentials for fallback storage
+1. Supabase project with Vault extension enabled
+2. Test users created (run setup_database.py first)
+3. GitHub Personal Access Token with Copilot access
 
 Run this after setup_database.py
 """
@@ -19,75 +17,135 @@ import os
 import sys
 from dotenv import load_dotenv
 from supabase import create_client
+import time
 
-# --- Secret Storage Functions ---
-
-async def store_with_supabase_vault(supabase, user_id: str, github_pat: str) -> bool:
-    """Store secret using Supabase Vault (alpha feature)."""
+def setup_vault_extension(supabase):
+    """Check if Vault extension is enabled and working."""
     try:
-        # Store secret in Supabase Vault
-        vault_response = supabase.postgrest.rpc(
-            'vault_write_secret',
-            {
-                'secret_name': f'user_{user_id}_github_pat',
-                'secret_value': github_pat
-            }
-        ).execute()
+        # Test if vault is working by trying to create a test secret
+        result = supabase.postgrest.rpc('vault_create_secret', {
+            'secret': 'test_vault_connection',
+            'name': 'vault_test_' + str(int(time.time())),
+            'description': 'Test secret to verify vault is working'
+        }).execute()
         
-        if vault_response.data:
-            print(f"✅ Stored GitHub PAT in Supabase Vault for user {user_id}")
+        if result.data:
+            # Vault is working, clean up test secret
+            test_name = f'vault_test_{int(time.time())}'
+            try:
+                supabase.postgrest.rpc('vault_delete_secret', {'secret_name': test_name}).execute()
+            except:
+                pass  # Ignore cleanup errors
+            
+            print("✅ Supabase Vault extension is enabled and working")
             return True
         else:
-            print(f"❌ Failed to store in Supabase Vault for user {user_id}")
+            print("❌ Vault function exists but returned no data")
             return False
             
     except Exception as e:
-        print(f"⚠️  Supabase Vault error for user {user_id}: {e}")
+        print("❌ Vault extension not properly configured")
+        print(f"   Error: {e}")
+        print("\n📚 Manual setup required:")
+        print("1. Go to your Supabase Dashboard → Database → Extensions")
+        print("2. Enable the 'supabase_vault' extension")
+        print("3. Go to SQL Editor and run this SQL:")
+        print("""
+-- Drop existing functions first (if any)
+DROP FUNCTION IF EXISTS vault_create_secret(text, text, text);
+DROP FUNCTION IF EXISTS vault_read_secret(text);
+DROP FUNCTION IF EXISTS vault_delete_secret(text);
+
+-- Enable the vault extension
+CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
+
+-- Create helper functions
+CREATE OR REPLACE FUNCTION vault_create_secret(secret text, name text default null, description text default null)
+RETURNS uuid AS $$
+BEGIN
+  RETURN vault.create_secret(secret, name, description);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION vault_read_secret(secret_name text)
+RETURNS text AS $$
+DECLARE
+  result text;
+BEGIN
+  SELECT decrypted_secret INTO result
+  FROM vault.decrypted_secrets
+  WHERE name = secret_name;
+  RETURN result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION vault_delete_secret(secret_name text)
+RETURNS void AS $$
+BEGIN
+  DELETE FROM vault.secrets WHERE name = secret_name;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+        """)
         return False
 
-def store_with_aws_secrets(user_id: str, github_pat: str) -> bool:
-    """Store secret using AWS Secrets Manager (fallback)."""
+def store_github_pat(supabase, user_id: str, email: str, github_pat: str):
+    """Store GitHub PAT for a user in Supabase Vault."""
+    secret_name = f"github_pat_{user_id}"
+    description = f"GitHub PAT for {email}"
+    
     try:
-        import boto3
-        from botocore.exceptions import ClientError
+        # Store the secret using Vault's create_secret function
+        result = supabase.postgrest.rpc('vault_create_secret', {
+            'secret': github_pat,
+            'name': secret_name,
+            'description': description
+        }).execute()
         
-        secrets_client = boto3.client(
-            'secretsmanager',
-            aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],
-            region_name=os.environ['AWS_REGION']
-        )
-        
-        secret_name = f"{user_id}_github_pat"
-        
-        try:
-            # Create the secret
-            response = secrets_client.create_secret(
-                Name=secret_name,
-                SecretString=github_pat,
-                Description=f"GitHub PAT for user {user_id}"
-            )
-            print(f"✅ Stored GitHub PAT in AWS Secrets Manager for user {user_id}")
+        if result.data:
+            secret_id = result.data
+            print(f"✅ Stored GitHub PAT for {email}")
+            print(f"   Secret ID: {secret_id}")
+            print(f"   Secret name: {secret_name}")
             return True
+        else:
+            print(f"❌ Failed to store GitHub PAT for {email}")
+            return False
             
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'ResourceExistsException':
-                # Update existing secret
-                secrets_client.update_secret(
-                    SecretId=secret_name,
-                    SecretString=github_pat
-                )
-                print(f"✅ Updated GitHub PAT in AWS Secrets Manager for user {user_id}")
-                return True
-            else:
-                print(f"❌ AWS Secrets Manager error for user {user_id}: {e}")
-                return False
-                
     except Exception as e:
-        print(f"⚠️  AWS Secrets Manager not available: {e}")
+        print(f"❌ Error storing GitHub PAT for {email}: {e}")
         return False
 
-# --- Main Setup Logic ---
+def verify_secrets(supabase, user_emails):
+    """Verify that secrets were stored correctly by reading them back."""
+    print("\n🔍 Verifying stored secrets...")
+    
+    try:
+        # Get all secrets from vault
+        result = supabase.postgrest.from_('vault.decrypted_secrets').select('name, description, decrypted_secret').execute()
+        
+        if result.data:
+            stored_secrets = {secret['name']: secret for secret in result.data}
+            
+            for email in user_emails:
+                # Find user to get their ID
+                users = supabase.auth.admin.list_users()
+                user = next((u for u in users if u.email == email), None)
+                
+                if user:
+                    secret_name = f"github_pat_{user.id}"
+                    if secret_name in stored_secrets:
+                        secret = stored_secrets[secret_name]
+                        print(f"✅ {email}: Secret found and readable")
+                        print(f"   Name: {secret['name']}")
+                        print(f"   Description: {secret['description']}")
+                        # Don't print the actual secret for security
+                    else:
+                        print(f"❌ {email}: Secret not found")
+        else:
+            print("❌ No secrets found in vault")
+            
+    except Exception as e:
+        print(f"⚠️  Error verifying secrets: {e}")
 
 def main():
     # Load environment variables
@@ -113,10 +171,15 @@ def main():
         print(f"❌ Failed to connect to Supabase: {e}")
         sys.exit(1)
     
+    # Setup Vault extension
+    if not setup_vault_extension(supabase):
+        print("❌ Cannot proceed without Vault extension. Please set it up manually.")
+        sys.exit(1)
+    
     # Get GitHub PAT from environment
     github_pat = os.environ["GITHUB_PAT"]
     
-    print("🔐 Setting up GitHub PAT storage with multiple options...")
+    print("\n🔐 Storing GitHub PATs in Supabase Vault...")
     
     # Get test users from Supabase
     try:
@@ -142,77 +205,20 @@ def main():
     
     # Store secrets for each user
     successful_stores = 0
-    storage_methods_used = set()
     
     for user in test_users:
-        user_stored = False
-        
-        # Try Supabase Vault first
-        print(f"\n🔐 Storing secrets for {user.email}...")
-        print("1️⃣ Trying Supabase Vault (alpha feature)...")
-        
-        try:
-            print("   ℹ️  Supabase Vault is in alpha - simulating storage pattern")
-            print(f"   📋 Would store: user_{user.id}_github_pat")
-            storage_methods_used.add("Supabase Vault (simulated)")
-            user_stored = True
-            successful_stores += 1
-        except:
-            pass
-        
-        # Try AWS Secrets Manager if available
-        if not user_stored and all(os.getenv(key) for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION']):
-            print("2️⃣ Trying AWS Secrets Manager...")
-            if store_with_aws_secrets(user.id, github_pat):
-                storage_methods_used.add("AWS Secrets Manager")
-                user_stored = True
-                successful_stores += 1
-        
-        # Environment variable fallback (development only)
-        if not user_stored:
-            print("3️⃣ Using environment variable fallback (development only)")
-            print(f"   ⚠️  Using shared GITHUB_PAT from environment for {user.email}")
-            storage_methods_used.add("Environment variables")
-            user_stored = True
+        if store_github_pat(supabase, user.id, user.email, github_pat):
             successful_stores += 1
     
-    print(f"\n🎉 Secret storage setup complete!")
-    print(f"✅ Successfully configured {successful_stores}/{len(test_users)} user secrets")
-    print(f"📋 Storage methods used: {', '.join(storage_methods_used)}")
+    print(f"\n🎉 Secret storage complete!")
+    print(f"✅ Successfully stored {successful_stores}/{len(test_users)} GitHub PATs")
     
-    # Show setup instructions for Supabase Vault
-    print(f"\n📚 Supabase Vault Setup Instructions:")
-    print(f"1. Enable Supabase Vault in your project (alpha feature)")
-    print(f"2. Create vault functions in your Supabase SQL editor:")
-    print(f"""
-    -- Enable the vault extension
-    create extension if not exists supabase_vault with schema vault;
-    
-    -- Create functions for storing/reading secrets
-    create or replace function vault_write_secret(secret_name text, secret_value text)
-    returns void as $$
-    begin
-      perform vault.create_secret(secret_name, secret_value);
-    end;
-    $$ language plpgsql security definer;
-    
-    create or replace function vault_read_secret(secret_name text)
-    returns table(decrypted_secret text) as $$
-    begin
-      return query select vault.decrypted_secret(secret_name);
-    end;
-    $$ language plpgsql security definer;
-    """)
-    
-    print(f"\n🔄 Alternative Secret Storage Options:")
-    print(f"• AWS Secrets Manager: Add AWS credentials to .env")
-    print(f"• Google Secret Manager: Modify auth.py to use GCP")
-    print(f"• HashiCorp Vault: Implement Vault client in auth.py")
-    print(f"• Azure Key Vault: Add Azure SDK integration")
+    # Verify the secrets were stored correctly
+    verify_secrets(supabase, [user.email for user in test_users])
     
     print(f"\n🔄 Next steps:")
     print(f"1. Run `python generate_supabase_token.py` to get authentication tokens")
-    print(f"2. Start LangGraph with `langgraph dev --disable-studio-auth`")
+    print(f"2. Start LangGraph with `langgraph dev`")
     print(f"3. Test the authentication flow in LangGraph Studio")
 
 if __name__ == "__main__":

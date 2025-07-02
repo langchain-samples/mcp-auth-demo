@@ -39,7 +39,7 @@ def main():
     
     # Get email from command line or use default
     email = sys.argv[1] if len(sys.argv) > 1 else "user1@example.com"
-    password = "testpass123" if email == "user1@example.com" else "testpass456"
+    password = "testpass123"  # Same password for all test users
     
     # Initialize Supabase client with anon key (for client-side auth)
     try:
@@ -78,7 +78,7 @@ def main():
             print(f"Header Value: Bearer {token}")
             
             print(f"\n🧪 Test with curl:")
-            print(f"""curl -X POST http://localhost:8123/runs \\
+            print(f"""curl -X POST http://localhost:2024/runs \\
   -H "Authorization: Bearer {token}" \\
   -H "Content-Type: application/json" \\
   -d '{{"input": {{"messages": [{{"role": "user", "content": "List my GitHub repositories"}}]}}}}'""")
@@ -116,7 +116,7 @@ def main():
     
     print(f"\n🔄 Next steps:")
     print(f"1. Copy the Authorization header above")
-    print(f"2. Start LangGraph: `langgraph dev --disable-studio-auth`")
+    print(f"2. Start LangGraph: `langgraph dev`")
     print(f"3. Open LangGraph Studio and add the header")
     print(f"4. Test with a GitHub-related query")
 
@@ -129,7 +129,7 @@ Usage:
 
 Available test users:
     user1@example.com (password: testpass123)
-    user2@example.com (password: testpass456)
+    user2@example.com (password: testpass123)
 
 Examples:
     python generate_supabase_token.py user1@example.com

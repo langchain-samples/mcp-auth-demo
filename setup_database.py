@@ -47,7 +47,7 @@ def main():
         },
         {
             "email": "user2@example.com", 
-            "password": "testpass456",
+            "password": "testpass123",  # Using same password for simplicity
             "email_confirm": True,
             "user_metadata": {
                 "name": "Test User 2",
@@ -107,7 +107,7 @@ def main():
     print("🔄 Next steps:")
     print("1. Run `python setup_secrets.py` to store GitHub tokens")
     print("2. Run `python generate_supabase_token.py` to get test tokens")
-    print("3. Start LangGraph with `langgraph dev --disable-studio-auth`")
+    print("3. Start LangGraph with `langgraph dev`")
 
 if __name__ == "__main__":
     main()
