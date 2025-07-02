@@ -6,13 +6,11 @@ langchain-core
 langchain-openai
 langchain-mcp-adapters
 
-# Authentication & Database
-supabase
-boto3
-botocore
+# Authentication & HTTP
+httpx
+python-dotenv
 
 # Utilities
-python-dotenv
 aiohttp
 requests
 pydantic

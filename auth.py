@@ -6,7 +6,7 @@ following the LangGraph documentation patterns:
 https://langchain-ai.github.io/langgraph/how-tos/auth/
 
 Key concepts demonstrated:
-1. Supabase token validation
+1. Supabase token validation via httpx (async)
 2. Supabase Vault for secret storage (with fallback options)
 3. User-specific GitHub token retrieval
 4. Proper error handling and security
@@ -18,10 +18,10 @@ Secret Storage Options:
 """
 
 import os
+import httpx
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from langgraph_sdk import Auth
-from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -29,12 +29,11 @@ load_dotenv()
 # Initialize auth handler (following documentation pattern exactly)
 auth = Auth()
 
-# Initialize Supabase client
-supabase: Client = create_client(
-    os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_SERVICE_KEY"]
-)
+# Get Supabase configuration from environment
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
+# Helper function to get github user token
 async def get_user_github_token(user_id: str) -> Optional[str]:
     """
     Get user's GitHub token from secret storage.
@@ -47,42 +46,26 @@ async def get_user_github_token(user_id: str) -> Optional[str]:
     
     # Option 1: Try Supabase Vault (alpha feature)
     try:
-        # Supabase Vault API call
-        vault_response = supabase.postgrest.rpc(
-            'vault_read_secret',
-            {'secret_name': f'user_{user_id}_github_pat'}
-        ).execute()
-        
-        if vault_response.data and len(vault_response.data) > 0:
-            return vault_response.data[0].get('decrypted_secret')
+        # Use httpx for async Vault access
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/vault_read_secret",
+                json={'secret_name': f'github_pat_{user_id}'},
+                headers={
+                    "apiKey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json"
+                }
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    return data
             
     except Exception as e:
         print(f"Supabase Vault not available: {e}")
     
-    # Option 2: Try AWS Secrets Manager (if configured)
-    if all(os.getenv(key) for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION']):
-        try:
-            import boto3
-            from botocore.exceptions import ClientError
-            
-            secrets_client = boto3.client(
-                'secretsmanager',
-                aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
-                aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],
-                region_name=os.environ['AWS_REGION']
-            )
-            
-            secret_name = f"{user_id}_github_pat"
-            response = secrets_client.get_secret_value(SecretId=secret_name)
-            return response['SecretString']
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] != 'ResourceNotFoundException':
-                print(f"AWS Secrets Manager error: {e}")
-        except Exception as e:
-            print(f"AWS Secrets Manager not available: {e}")
-    
-    # Option 3: Environment variable (development only)
+    # Option 2: Environment variable (development only)
     env_token = os.getenv("GITHUB_PAT")
     if env_token:
         print(f"Warning: Using shared GitHub token from environment for user {user_id}")
@@ -90,59 +73,98 @@ async def get_user_github_token(user_id: str) -> Optional[str]:
     
     return None
 
+# Function to Authenticate user with supabase
 @auth.authenticate
-async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
+async def get_current_user(authorization: str | None):
     """
-    Custom authentication handler using Supabase + flexible secret storage.
+    Custom authentication handler using Supabase.
     
-    This is the exact pattern from the LangGraph docs, adapted for:
-    - Supabase user authentication
-    - Multiple secret storage options (Supabase Vault, AWS, etc.)
-    
-    The returned object populates config["configurable"]["langgraph_auth_user"]
+    This follows the exact pattern from the LangGraph docs:
+    - Takes authorization header as string parameter
+    - Returns MinimalUserDict with user information
     """
-    # Extract Supabase token from Authorization header
-    auth_header = headers.get("authorization", "")
-    token = auth_header.replace("Bearer ", "").strip()
-    
-    if not token:
+    if not authorization:
         raise Auth.exceptions.HTTPException(
             status_code=401, 
-            detail="Missing authorization token"
+            detail="Missing authorization header"
         )
     
-    # Validate token with Supabase
+    # Parse the authorization header
     try:
-        user_response = supabase.auth.get_user(token)
-        if not user_response.user:
-            raise Auth.exceptions.HTTPException(
-                status_code=401,
-                detail="Invalid token"
+        scheme, token = authorization.split()
+        assert scheme.lower() == "bearer"
+    except Exception:
+        raise Auth.exceptions.HTTPException(
+            status_code=401,
+            detail="Invalid authorization header format"
+        )
+    
+    # Validate token with Supabase using httpx (async)
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={
+                    "Authorization": authorization,
+                    "apiKey": SUPABASE_SERVICE_KEY,
+                },
             )
-        
-        user = user_response.user
-        
-    except Exception as e:
+            if response.status_code != 200:
+                raise Auth.exceptions.HTTPException(
+                    status_code=401,
+                    detail="Invalid token"
+                )
+            
+            user = response.json()
+            
+    except httpx.HTTPError as e:
         raise Auth.exceptions.HTTPException(
             status_code=401,
             detail=f"Token validation failed: {str(e)}"
         )
     
-    # Fetch user's GitHub token from secret storage
-    github_token = await get_user_github_token(user.id)
+    # Get user's GitHub token (if available)
+    github_token = await get_user_github_token(user["id"])
     
-    if not github_token:
-        print(f"Warning: No GitHub token found for user {user.email} ({user.id})")
-    
-    # Return user config that will be available in graph nodes
-    # This populates config["configurable"]["langgraph_auth_user"]
+    # Return MinimalUserDict as required by LangGraph auth API
     return {
-        "identity": user.id,  # Required field - using Supabase user UUID
-        "email": user.email,
-        "github_token": github_token,
-        "user_metadata": user.user_metadata or {},
-        # Additional fields can be added here
+        "identity": user["id"],  # Required: unique user identifier
+        "is_authenticated": True,  # Optional but good practice
+        "email": user.get("email"),  # Add email if available
+        "role": user.get("user_metadata", {}).get("role", "user"),
+        "github_token": github_token  # Add GitHub token for the agent to use
     }
+
+
+# Authorization handler - REQUIRED when disable_studio_auth is true
+@auth.on
+async def add_owner(ctx: Auth.types.AuthContext, value: dict) -> dict:
+    """
+    Authorization handler for all resources (assistants, threads, runs, etc).
+    
+    When disable_studio_auth is true, this handler is REQUIRED to allow
+    LangGraph Studio to access internal resources like assistants.
+    """
+    # Debug logging - use correct AuthContext attributes
+    print(f"Auth handler called for resource: {ctx.resource}, action: {ctx.action}")
+    print(f"User identity: {ctx.user.identity}")
+    print(f"Value type: {type(value)}")
+    
+    # For assistants endpoint, we may not have a value dict
+    # or it might be None for list operations
+    if value is None:
+        # For list/search operations, just return filter
+        return {"owner": ctx.user.identity}
+    
+    # Add owner metadata to new resources
+    filters = {"owner": ctx.user.identity}
+    metadata = value.setdefault("metadata", {})
+    metadata.update(filters)
+    
+    # Return filter to restrict access to user's own resources
+    # This ensures users can only see/access their own data
+    return filters
+
 
 # Export the auth object for use in langgraph.json
 __all__ = ["auth"]

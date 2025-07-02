@@ -34,19 +34,24 @@ async def get_mcp_tools(user: Dict[str, Any]) -> List[Tool]:
     GitHub token to create authenticated MCP tools.
     """
     if not user or not user.get("github_token"):
+        print("Warning: No GitHub token found for user")
         return []
     
     try:
         # Create MCP client with user's GitHub token
+        github_url = os.getenv("GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/")
+        print(f"Attempting to connect to GitHub MCP at: {github_url}")
+        
         mcp_client = MultiServerMCPClient({
             "github": {
                 "transport": "streamable_http", 
-                "url": os.getenv("GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/"),
+                "url": github_url,
                 "authorization_token": f"Bearer {user['github_token']}"
             }
         })
         
         # Get tools from MCP server and convert to LangChain tools
+        print("Getting tools from MCP server...")
         mcp_tools = await mcp_client.get_tools()
         tools = []
         
@@ -55,30 +60,19 @@ async def get_mcp_tools(user: Dict[str, Any]) -> List[Tool]:
             tool = mcp_client.get_tool(tool_name)
             tools.append(tool)
         
+        print(f"✅ Successfully loaded {len(tools)} real MCP tools from GitHub")
         return tools
         
     except Exception as e:
-        print(f"Warning: Could not connect to MCP server: {e}")
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            print("ℹ️  GitHub Copilot MCP access not available (requires Copilot subscription)")
+        else:
+            print(f"Warning: Could not connect to MCP server: {e}")
         
-        # Return mock tools for demo purposes
-        async def mock_list_repos(**kwargs):
-            return f"Mock response: Found 5 repositories for user {user.get('email', 'unknown')}"
-        
-        async def mock_get_repo(owner: str, repo: str):
-            return f"Mock response: Repository {owner}/{repo} - A sample repository"
-        
-        return [
-            Tool(
-                name="list_repositories",
-                description="List GitHub repositories for the authenticated user",
-                func=mock_list_repos
-            ),
-            Tool(
-                name="get_repository", 
-                description="Get information about a specific GitHub repository",
-                func=mock_get_repo
-            )
-        ]
+        print("🔄 Falling back to no tools...")
+        return []
+
 
 async def agent_node(state: MessagesState, config: Dict[str, Any]) -> MessagesState:
     """
