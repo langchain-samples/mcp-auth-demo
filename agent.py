@@ -1,169 +1,167 @@
 """
-Agent with MCP Authentication
+Clean LangGraph Agent with MCP Authentication
 
-This demonstrates the exact patterns from the LangGraph documentation:
-https://langchain-ai.github.io/langgraph/how-tos/auth/
+This demonstrates proper LangGraph patterns with user-scoped MCP authentication.
+Following LangGraph best practices for simplicity and maintainability.
 
 Key concepts:
-1. Accessing user config via config["configurable"]["langgraph_auth_user"]
-2. Using user tokens to authenticate with MCP servers
-3. Proper MCP client configuration
+1. Access user via config["configurable"]["langgraph_auth_user"]
+2. Create MCP tools with user authentication
+3. Use simple, clean LangGraph patterns
+4. Proper separation of concerns
 """
 
 import os
-from typing import Dict, Any, List, TypedDict
+from typing import List, Dict, Any
 from dotenv import load_dotenv
+
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph.message import MessagesState
+from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.tools import Tool
+from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import ToolNode
 
 # Load environment variables
 load_dotenv()
 
-class AgentState(TypedDict):
-    """State for the MCP authentication agent."""
-    messages: List[Dict[str, Any]]
-    user_request: str
-    mcp_tools: List[Dict[str, Any]]
-    github_data: Dict[str, Any]
-    errors: List[str]
-
-def get_mcp_tools_node(state: AgentState, config: Dict[str, Any]) -> AgentState:
+async def get_mcp_tools(user: Dict[str, Any]) -> List[Tool]:
     """
-    Node that demonstrates the exact pattern from LangGraph documentation.
+    Create MCP tools with user authentication.
     
-    Shows how to:
-    1. Access user config from config["configurable"]["langgraph_auth_user"]
-    2. Use user tokens to authenticate with MCP server
-    3. Get tools from GitHub MCP server
-    
-    This is the exact pattern shown in the docs.
+    This is where the authentication magic happens - we use the user's
+    GitHub token to create authenticated MCP tools.
     """
-    # Get authenticated user from config (EXACT pattern from docs)
-    user = config["configurable"].get("langgraph_auth_user")
-    # e.g., user["github_token"], user["email"], etc.
-    
-    if not user:
-        return {
-            **state,
-            "errors": state.get("errors", []) + ["No authenticated user found"],
-            "messages": state["messages"] + [
-                AIMessage(content="Error: No authenticated user found")
-            ]
-        }
+    if not user or not user.get("github_token"):
+        return []
     
     try:
-        # Create MCP client (EXACT pattern from docs)
-        client = MultiServerMCPClient({
+        # Create MCP client with user's GitHub token
+        mcp_client = MultiServerMCPClient({
             "github": {
-                "transport": "streamable_http",
+                "transport": "streamable_http", 
                 "url": os.getenv("GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/"),
                 "authorization_token": f"Bearer {user['github_token']}"
             }
         })
         
-        # Get available tools from GitHub MCP server
-        tools = client.get_tools()  # This would be awaited in real usage
+        # Get tools from MCP server and convert to LangChain tools
+        mcp_tools = await mcp_client.get_tools()
+        tools = []
         
-        return {
-            **state,
-            "mcp_tools": tools if tools else [],
-            "messages": state["messages"] + [
-                AIMessage(content=f"✅ Connected to GitHub MCP server and retrieved {len(tools) if tools else 0} tools for user {user.get('email')}")
-            ]
-        }
+        for tool_info in mcp_tools:
+            tool_name = tool_info["name"]
+            tool = mcp_client.get_tool(tool_name)
+            tools.append(tool)
+        
+        return tools
         
     except Exception as e:
-        # For demo: show successful pattern even if connection fails
-        mock_tools = [
-            {"name": "get_repository", "description": "Get repository information"},
-            {"name": "list_repositories", "description": "List user repositories"},
-            {"name": "create_issue", "description": "Create a new issue"},
-            {"name": "search_repositories", "description": "Search for repositories"}
+        print(f"Warning: Could not connect to MCP server: {e}")
+        
+        # Return mock tools for demo purposes
+        async def mock_list_repos(**kwargs):
+            return f"Mock response: Found 5 repositories for user {user.get('email', 'unknown')}"
+        
+        async def mock_get_repo(owner: str, repo: str):
+            return f"Mock response: Repository {owner}/{repo} - A sample repository"
+        
+        return [
+            Tool(
+                name="list_repositories",
+                description="List GitHub repositories for the authenticated user",
+                func=mock_list_repos
+            ),
+            Tool(
+                name="get_repository", 
+                description="Get information about a specific GitHub repository",
+                func=mock_get_repo
+            )
         ]
-        
-        return {
-            **state,
-            "mcp_tools": mock_tools,
-            "messages": state["messages"] + [
-                AIMessage(content=f"✅ Authentication pattern working! Retrieved user {user.get('email')}'s GitHub token and created MCP client. (Using mock tools for demo)")
-            ]
-        }
 
-def call_github_tool_node(state: AgentState, config: Dict[str, Any]) -> AgentState:
+async def agent_node(state: MessagesState, config: Dict[str, Any]) -> MessagesState:
     """
-    Node that demonstrates calling MCP tools with user authentication.
+    Main agent node that handles user requests with MCP tools.
     """
-    user = config["configurable"].get("langgraph_auth_user")
+    # Get user from LangGraph auth
+    user = config.get("configurable", {}).get("langgraph_auth_user")
+    user_email = user.get('email', 'Unknown') if user else 'Not authenticated'
     
-    if not user:
-        return {
-            **state,
-            "errors": state.get("errors", []) + ["No authenticated user found"]
-        }
+    # Get MCP tools for this user
+    tools = await get_mcp_tools(user)
     
-    try:
-        # Create MCP client with user's authentication
-        client = MultiServerMCPClient({
-            "github": {
-                "transport": "streamable_http",
-                "url": os.getenv("GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/"),
-                "authorization_token": f"Bearer {user['github_token']}"
-            }
-        })
-        
-        # Example: Call a GitHub tool (this would be awaited in real usage)
-        # result = await client.call_tool("github", "get_user", {})
-        
-        # For demo: simulate successful call
-        mock_result = {
-            "login": "demo_user",
-            "name": "Demo User",
-            "email": user.get("email"),
-            "public_repos": 15
-        }
-        
-        return {
-            **state,
-            "github_data": mock_result,
-            "messages": state["messages"] + [
-                AIMessage(content=f"✅ Successfully called GitHub MCP tool for user {user.get('email')}. Found user profile with {mock_result['public_repos']} public repos.")
-            ]
-        }
-        
-    except Exception as e:
-        return {
-            **state,
-            "errors": state.get("errors", []) + [str(e)],
-            "messages": state["messages"] + [
-                AIMessage(content=f"❌ Error calling GitHub tool: {str(e)}")
-            ]
-        }
+    # Create LLM with tools bound
+    llm = ChatOpenAI(model="gpt-4", temperature=0)
+    if tools:
+        llm = llm.bind_tools(tools)
+    
+    # Create system message
+    system_message = f"""You are a helpful GitHub assistant with access to GitHub tools via MCP.
 
-def create_agent() -> StateGraph:
-    """
-    Create the MCP authentication demo agent.
-    """
-    graph = StateGraph(AgentState)
+User Information:
+- Email: {user_email}
+- Authentication: {'✅ Authenticated' if user and user.get('github_token') else '❌ Not authenticated'}
+- Available tools: {len(tools)}
+
+You can help with GitHub-related tasks. When appropriate, use the available tools to get real information."""
+
+    # Prepare messages with system message
+    messages = [SystemMessage(content=system_message)] + state["messages"]
+    
+    # Call LLM
+    response = await llm.ainvoke(messages)
+    
+    return {"messages": state["messages"] + [response]}
+
+def should_continue(state: MessagesState) -> str:
+    """Check if we should continue to tools or end."""
+    last_message = state["messages"][-1]
+    if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+        return "tools"
+    return END
+
+def create_graph() -> StateGraph:
+    """Create the agent graph following LangGraph best practices."""
+    
+    # Create the graph
+    graph = StateGraph(MessagesState)
     
     # Add nodes
-    graph.add_node("get_mcp_tools", get_mcp_tools_node)
-    graph.add_node("call_github_tool", call_github_tool_node)
+    graph.add_node("agent", agent_node)
+    
+    # Create a dynamic tool node
+    async def tool_node(state: MessagesState, config: Dict[str, Any]) -> MessagesState:
+        user = config.get("configurable", {}).get("langgraph_auth_user")
+        tools = await get_mcp_tools(user)
+        
+        if not tools:
+            return {"messages": state["messages"] + [AIMessage(content="No tools available.")]}
+        
+        tool_node_instance = ToolNode(tools)
+        return await tool_node_instance.ainvoke(state, config)
+    
+    graph.add_node("tools", tool_node)
     
     # Set entry point
-    graph.set_entry_point("get_mcp_tools")
+    graph.set_entry_point("agent")
     
-    # Add edges
-    graph.add_edge("get_mcp_tools", "call_github_tool")
-    graph.add_edge("call_github_tool", END)
+    # Add conditional edges
+    graph.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", END: END}
+    )
+    
+    # Tools go back to agent
+    graph.add_edge("tools", "agent")
     
     return graph.compile()
 
 # Create the compiled graph for LangGraph Platform
-graph = create_agent()
+graph = create_graph()
 
 if __name__ == "__main__":
-    # Test the agent locally
-    print("🔐 MCP Authentication Agent Demo")
-    print("This agent demonstrates user authentication with MCP servers")
+    print("🔐 Clean MCP Authentication Agent")
+    print("This agent demonstrates proper LangGraph patterns with user auth")
     print("Deploy to LangGraph Platform with: langgraph deploy")

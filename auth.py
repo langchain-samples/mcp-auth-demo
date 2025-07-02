@@ -1,23 +1,27 @@
 """
 Agent Authentication Handler
 
-This module implements the exact authentication patterns from the LangGraph documentation:
+This module implements Supabase authentication + secret storage
+following the LangGraph documentation patterns:
 https://langchain-ai.github.io/langgraph/how-tos/auth/
 
 Key concepts demonstrated:
-1. Custom @auth.authenticate handler
-2. Populating langgraph_auth_user object
-3. Fetching user tokens from secret store
-4. Proper error handling
+1. Supabase token validation
+2. Supabase Vault for secret storage (with fallback options)
+3. User-specific GitHub token retrieval
+4. Proper error handling and security
+
+Secret Storage Options:
+- Supabase Vault (default, alpha feature)
+- AWS Secrets Manager (fallback)
+- Environment variables (development)
 """
 
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from langgraph_sdk import Auth
-
-# Import secret management
-from secret_management import SecretStore, UserTokens
+from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -25,66 +29,119 @@ load_dotenv()
 # Initialize auth handler (following documentation pattern exactly)
 auth = Auth()
 
-def is_valid_key(api_key: str) -> bool:
-    """
-    Validate API key - simplified for demo.
-    
-    In production, validate against your auth provider.
-    """
-    # For demo: accept keys that start with "demo_api_key"
-    return api_key and api_key.startswith("demo_api_key")
+# Initialize Supabase client
+supabase: Client = create_client(
+    os.environ["SUPABASE_URL"],
+    os.environ["SUPABASE_SERVICE_KEY"]
+)
 
-async def fetch_user_tokens(api_key: str) -> UserTokens:
+async def get_user_github_token(user_id: str) -> Optional[str]:
     """
-    Fetch user-specific tokens from your secret store.
+    Get user's GitHub token from secret storage.
     
-    This is where you'd integrate with your actual secret management system.
+    Tries multiple storage options in order:
+    1. Supabase Vault (alpha feature)
+    2. AWS Secrets Manager (if configured)
+    3. Environment variable (development only)
     """
-    store = SecretStore("demo_store")
     
-    # For demo: map API keys to demo users
-    user_id_map = {
-        "demo_api_key_123": "user_123",
-        "demo_api_key_456": "user_456", 
-        "demo_api_key_789": "user_789"
-    }
+    # Option 1: Try Supabase Vault (alpha feature)
+    try:
+        # Supabase Vault API call
+        vault_response = supabase.postgrest.rpc(
+            'vault_read_secret',
+            {'secret_name': f'user_{user_id}_github_pat'}
+        ).execute()
+        
+        if vault_response.data and len(vault_response.data) > 0:
+            return vault_response.data[0].get('decrypted_secret')
+            
+    except Exception as e:
+        print(f"Supabase Vault not available: {e}")
     
-    user_id = user_id_map.get(api_key, "user_123")
+    # Option 2: Try AWS Secrets Manager (if configured)
+    if all(os.getenv(key) for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION']):
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            secrets_client = boto3.client(
+                'secretsmanager',
+                aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
+                aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],
+                region_name=os.environ['AWS_REGION']
+            )
+            
+            secret_name = f"{user_id}_github_pat"
+            response = secrets_client.get_secret_value(SecretId=secret_name)
+            return response['SecretString']
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ResourceNotFoundException':
+                print(f"AWS Secrets Manager error: {e}")
+        except Exception as e:
+            print(f"AWS Secrets Manager not available: {e}")
     
-    # Get GitHub token from environment for demo
-    github_token = os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if not github_token:
-        raise Exception("No GitHub token found in environment")
+    # Option 3: Environment variable (development only)
+    env_token = os.getenv("GITHUB_PAT")
+    if env_token:
+        print(f"Warning: Using shared GitHub token from environment for user {user_id}")
+        return env_token
     
-    # In production, you'd fetch user-specific tokens from your secret store
-    return UserTokens(
-        github_token=github_token,
-        refresh_token=f"refresh_{user_id}"
-    )
+    return None
 
 @auth.authenticate
 async def authenticate(headers: dict) -> Auth.types.MinimalUserDict:
     """
-    Custom authentication handler following LangGraph documentation.
+    Custom authentication handler using Supabase + flexible secret storage.
     
-    This is the exact pattern from the docs:
-    https://langchain-ai.github.io/langgraph/how-tos/auth/
+    This is the exact pattern from the LangGraph docs, adapted for:
+    - Supabase user authentication
+    - Multiple secret storage options (Supabase Vault, AWS, etc.)
     
     The returned object populates config["configurable"]["langgraph_auth_user"]
     """
-    api_key = headers.get("x-api-key")
-    if not api_key or not is_valid_key(api_key):
-        raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid API key")
+    # Extract Supabase token from Authorization header
+    auth_header = headers.get("authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
     
-    # Fetch user-specific tokens from your secret store  
-    user_tokens = await fetch_user_tokens(api_key)
-
+    if not token:
+        raise Auth.exceptions.HTTPException(
+            status_code=401, 
+            detail="Missing authorization token"
+        )
+    
+    # Validate token with Supabase
+    try:
+        user_response = supabase.auth.get_user(token)
+        if not user_response.user:
+            raise Auth.exceptions.HTTPException(
+                status_code=401,
+                detail="Invalid token"
+            )
+        
+        user = user_response.user
+        
+    except Exception as e:
+        raise Auth.exceptions.HTTPException(
+            status_code=401,
+            detail=f"Token validation failed: {str(e)}"
+        )
+    
+    # Fetch user's GitHub token from secret storage
+    github_token = await get_user_github_token(user.id)
+    
+    if not github_token:
+        print(f"Warning: No GitHub token found for user {user.email} ({user.id})")
+    
+    # Return user config that will be available in graph nodes
+    # This populates config["configurable"]["langgraph_auth_user"]
     return {
-        "identity": api_key,  # Required field
-        "github_token": user_tokens.github_token,
-        "email": f"demo@example.com",
-        "org_id": "demo_org"
-        # ... custom fields/secrets here
+        "identity": user.id,  # Required field - using Supabase user UUID
+        "email": user.email,
+        "github_token": github_token,
+        "user_metadata": user.user_metadata or {},
+        # Additional fields can be added here
     }
 
 # Export the auth object for use in langgraph.json
