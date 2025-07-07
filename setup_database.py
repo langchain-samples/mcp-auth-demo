@@ -47,19 +47,10 @@ def main():
         },
         {
             "email": "user2@example.com", 
-            "password": "testpass123",
+            "password": "testpass456",
             "email_confirm": True,
             "user_metadata": {
                 "name": "Test User 2",
-                "role": "demo_user"
-            }
-        },
-        {
-            "email": "user3@example.com",
-            "password": "testpass123",
-            "email_confirm": True,
-            "user_metadata": {
-                "name": "Test User 3",
                 "role": "demo_user"
             }
         }
