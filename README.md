@@ -597,9 +597,9 @@ WHERE name LIKE 'github_pat_%';
 ## 📚 Additional Resources
 
 ### Official Documentation
-- [LangGraph Authentication Guide](https://langchain-ai.github.io/langgraph/how-tos/auth/)
-- [LangGraph MCP Server Integration](https://langchain-ai.github.io/langgraph/concepts/server-mcp/)
-- [MCP Authentication Patterns](https://langchain-ai.github.io/langgraph/concepts/mcp/#authenticate-to-an-mcp-server)
+- [LangGraph Authentication Guide](https://docs.langchain.com/langsmith/custom-auth)
+- [LangGraph MCP Server Integration](https://docs.langchain.com/oss/python/langchain/mcp)
+- [MCP Authentication Patterns](https://docs.langchain.com/oss/python/langchain/mcp#authentication)
 - [Supabase Vault Documentation](https://supabase.com/docs/guides/database/vault)
 - [Supabase Auth Documentation](https://supabase.com/docs/guides/auth)
 
