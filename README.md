@@ -2,7 +2,7 @@
 
 **End-to-end example of user authentication for LangGraph agents that interact with MCP servers using individual user credentials.**
 
-This repository demonstrates the complete authentication flow from user login through MCP server access, implementing the patterns from the [LangGraph Agent Authentication documentation](https://langchain-ai.github.io/langgraph/how-tos/auth/).
+This repository demonstrates the complete authentication flow from user login through MCP server access, implementing the patterns from the [LangGraph Agent Authentication documentation](https://docs.langchain.com/langsmith/auth).
 
 ## 🎯 What This Demo Shows
 
